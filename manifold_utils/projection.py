@@ -4,6 +4,93 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import pdb
 from tqdm import tqdm
+from sklearn.decomposition import PCA
+from pydiffmap import diffusion_map as dm
+import numpy as np
+
+class IdentityProjection:
+    def __init__(self):
+        pass
+
+    def fit(self, x):
+        return x
+    
+    def transform(self, x):
+        return x
+    
+    def inverse_transform(self, x):
+        return x
+        
+
+def get_up_projection_map(args, My_train, Rresp, Presp, project_type='pca', projection_map_y=None):
+    """
+    Returns a function that up-projects a vector in the projected space back to the original space.
+    """
+    if project_type == 'pca':
+        return projection_map_y.inverse_transform
+    elif project_type == 'I':
+        return projection_map_y.inverse_transform
+    elif project_type == 'dm':
+        input_dim = My_train.shape[-1]
+        output_dim = Rresp.shape[-1]  
+
+        My_train = torch.Tensor(My_train).to('cuda')
+        Rresp = torch.Tensor(Rresp).to('cuda')
+        train_dataset = TensorDataset(My_train, Rresp)
+        train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+
+        My_test = projection_map_y.transform(Presp)
+        My_test = torch.Tensor(My_test).to('cuda')
+        Presp = torch.Tensor(Presp).to('cuda')
+        test_dataset = TensorDataset(My_test, Presp)
+        test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+        
+        model = UpProjection(input_dim, output_dim)
+        train_model(model, train_dataloader, test_dataloader, epochs=args.autoencoder_epochs, lr=args.autoencoder_lr)
+        return model
+
+def down_project(x, project_type='pca', n_evecs=0.97):
+    """
+    Down-projects x to n_evecs using PCA or DM
+    """
+    if project_type == 'pca':
+        if n_evecs.is_integer(): n_evecs = int(n_evecs)
+
+        pca = PCA(n_components=n_evecs, whiten=True)
+        # project x onto the n eigenvectors set by n_evecs
+        x_projected = pca.fit_transform(x)
+        print('Explained var: ', np.sum(pca.explained_variance_ratio_))
+        print('Rank: ', pca.n_components_)
+        return x_projected, pca
+    
+    elif project_type == 'dm':
+        n_evecs = 1000 if n_evecs == 'auto' else n_evecs
+        dmap = dm.DiffusionMap.from_sklearn(n_evecs=int(n_evecs), epsilon='bgh', k=300)
+        return dmap.fit_transform(x), dmap
+    
+    elif project_type == 'I':
+        return x, IdentityProjection()
+    else:
+        raise ValueError(f"Invalid projection type: {project_type}")
+
+def get_up_projections_torch(My_train_hat, Rresp, up_projection_map_y):
+    """
+    This is for memory issues when using gpu.
+    """
+    eval_dataset = TensorDataset(My_train_hat, torch.Tensor(Rresp).to('cuda'))
+    eval_dataloader = DataLoader(eval_dataset, batch_size=32, shuffle=False)
+
+    preds = []
+
+    up_projection_map_y.eval()
+    for x_batch, _ in eval_dataloader:
+        with torch.no_grad():
+            pred = up_projection_map_y(x_batch).detach().cpu().numpy()
+            preds.append(pred)
+
+    preds = np.vstack(preds)
+    return preds
+
 
 class UpProjection(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_dims=[500, 1000, 10000]):

@@ -18,8 +18,8 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import r2_score
 import pdb
 from scipy.stats import pearsonr
-
-
+from tqdm import tqdm
+import json
 # Repository imports
 from ridge_utils.ridge import bootstrap_ridge
 import ridge_utils.npp
@@ -29,9 +29,10 @@ from ridge_utils.DataSequence import DataSequence
 from ridge_utils.tokenization_helpers import generate_efficient_feat_dicts_opt
 from ridge_utils.tokenization_helpers import convert_to_feature_mats_opt
 
-from manifold_utils.projection import UpProjection, train_model
+from manifold_utils.projection import down_project, get_up_projection_map, get_up_projections_torch
 from manifold_utils.algorithms import *
-from manifold_utils.constants import *
+from manifold_utils.constants import *  
+from manifold_utils.utils import print_stats
 
 def test(x_project, linear, inv_map):
     """
@@ -46,11 +47,12 @@ def test(x_project, linear, inv_map):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="facebook/opt-125m")
+    parser.add_argument("--y_projection", type=str, default="pca", choices=['pca', 'dm', 'I']) # I is identity projection
     parser.add_argument("--layer", type=int, default=9)
-    parser.add_argument("--n_evecs", type=int, default=40)
+    parser.add_argument("--n_evecs", type=float, default=1000)
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--k", type=int, default=64)
-    parser.add_argument("--autoencoder_epochs", type=int, default=100)
+    parser.add_argument("--autoencoder_epochs", type=int, default=1000)
     parser.add_argument("--autoencoder_lr", type=float, default=1e-3)
 
     args = parser.parse_args()
@@ -59,19 +61,16 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+    print(args)
 
     # These files are located in the story_data folder of the Box
     grids = joblib.load("grids_huge.jbl") # Load TextGrids containing story annotations
     trfiles = joblib.load("trfiles_huge.jbl") # Load TRFiles containing TR information
+    resp_dict = joblib.load("UTS03_responses.jbl") # Located in story_responses folder
 
     # We'll build an encoding model using this set of stories for this tutorial.
-    train_stories = ['adollshouse', 'adventuresinsayingyes', 'alternateithicatom', 'avatar', 'buck', 'exorcism',
-                'eyespy', 'fromboyhoodtofatherhood', 'hangtime', 'haveyoumethimyet', 'howtodraw', 'inamoment',
-                'itsabox', 'legacy', 'naked', 'odetostepfather', 'sloth',
-                'souls', 'stagefright', 'swimmingwithastronauts', 'thatthingonmyarm', 'theclosetthatateeverything',
-                'tildeath', 'undertheinfluence']
-
-    test_stories = ["wheretheressmoke"]
+    test_stories = ["wheretheressmoke", 'fromboyhoodtofatherhood', 'onapproachtopluto'] 
+    train_stories = [story for story in resp_dict.keys() if story in grids and story not in test_stories]
 
     # Filter out the other stories for the tutorial
     for story in list(grids):
@@ -89,17 +88,19 @@ if __name__ == "__main__":
     text_dict, text_dict2, text_dict3 = generate_efficient_feat_dicts_opt(wordseqs, tokenizer, 256, 512)
 
     # We are going to use the 125m parameter model for this tutorial, but any size should work 
-    model = AutoModelForCausalLM.from_pretrained(args.model)
+    model = AutoModelForCausalLM.from_pretrained(args.model, device_map='auto')
+    print('Loaded model and tokenizer')
 
     # We will extract features from the 9th layer of the model
     LAYER_NUM = args.layer
 
     start_time = time.time()
-    for phrase in text_dict2:
+    print('Extracting features')
+    for phrase in tqdm(text_dict2):
         if text_dict2[phrase]:
             inputs = {}
-            inputs['input_ids'] = torch.tensor([text_dict[phrase]]).int()
-            inputs['attention_mask'] = torch.ones(inputs['input_ids'].shape)
+            inputs['input_ids'] = torch.tensor([text_dict[phrase]]).int().to(model.device)
+            inputs['attention_mask'] = torch.ones(inputs['input_ids'].shape).to(model.device)
             out = list(model(**inputs, output_hidden_states=True)[2])
             out = out[LAYER_NUM][0].cpu().detach().numpy()
             out = np.array(out)
@@ -114,6 +115,7 @@ if __name__ == "__main__":
     print("Feature extraction took", end_time - start_time, "seconds on", model.device)
 
     # Convert back from dictionary to matrix
+
     feats = convert_to_feature_mats_opt(wordseqs, tokenizer, 256, 512, text_dict3)
 
     #Training data
@@ -127,94 +129,63 @@ if __name__ == "__main__":
     delPstim = make_delayed(Pstim, delays)
 
     # Get response data
-    resp_dict = joblib.load("UTS03_responses.jbl") # Located in story_responses folder
     Rresp = np.vstack([resp_dict[story] for story in train_stories])
     Presp = np.vstack([resp_dict[story][40:] for story in test_stories])
 
-    # Implement diffusion map
-    # step 1: project the stim to low dimensions
-    # print('Projecting x')
-        # t = time.time()
-    # dmap = dm.DiffusionMap.from_sklearn(n_evecs = 40, alpha = 0.5, epsilon = 'bgh', k=64) # choosing 40 eigenfunctions bc the ID ~ 40
-    # delRstim_projected = dmap.fit_transform(delRstim)
+    # Get explanatory variables
     Mx_train = delRstim
+    Mx_test = delPstim
 
-        # step 2: project the response to low dimensions
+    # step 2: project the response to low dimensions
     print('Projecting y')
-
     t = time.time()
-    dmap_y = dm.DiffusionMap.from_sklearn(n_evecs = 250, alpha = 0.5, epsilon = 'bgh', k=300)
-    Rresp_projected = dmap_y.fit_transform(Rresp)
-    My_train = Rresp_projected
-    np.save('My_train.npy', My_train)
-    print(f'Ran in {time.time() - t}s')
+
+    My_train, projection_map_y = down_project(Rresp, project_type=args.y_projection, n_evecs=args.n_evecs)
+    My_test = projection_map_y.transform(Presp)
+
+    print(f'Ran in {time.time() - t:.2f}s')
 
     # eval R^2
-    linear_model = Ridge(alpha=0.01)
+    linear_model = Ridge(alpha=0.05)
     linear_model.fit(Mx_train, My_train)
+
+    print('TRAIN metrics in M space=============================')
     My_train_hat = linear_model.predict(Mx_train)
+    R2_M, correlations_M = print_stats(My_train_hat, My_train)
 
-    print('Evaluating R2 in M space')
-    R2_M = linear_model.score(Mx_train, My_train)
-
-    print('Correlation: ', np.mean([pearsonr(My_train_hat[i], My_train[i])[0] for i in range(len(My_train_hat))]))
-    print('R2 in fitted space: ', R2_M)
+    print('TEST metrics in M space==============================')
+    My_test_hat = linear_model.predict(Mx_test)
+    R2_M_test, correlations_M_test = print_stats(My_test_hat, My_test)  
 
     # Make sure we can project back up to the original space.
     # step 4: learn a map from the projected response back up to the original
-    input_dim = My_train.shape[-1]
-    output_dim = Rresp.shape[-1]  
-
-    My_train = torch.Tensor(My_train).to('cuda')
-    Rresp = torch.Tensor(Rresp).to('cuda')
-    train_dataset = TensorDataset(My_train, Rresp)
-    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-
-    My_test = dmap_y.transform(Presp)
-    My_test = torch.Tensor(My_test).to('cuda')
-    Presp = torch.Tensor(Presp).to('cuda')
-    test_dataset = TensorDataset(My_test, Presp)
-    test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False)
-
-    model = UpProjection(input_dim, output_dim)
-    train_model(model, train_dataloader, test_dataloader, epochs=args.autoencoder_epochs, lr=args.autoencoder_lr)
-
+    up_projection_map_y = get_up_projection_map(args, My_train, Rresp, Presp, project_type=args.y_projection, projection_map_y=projection_map_y)
+    
     # step 5: evaluate the R^2 in the original space
-    My_train_hat = torch.Tensor(linear_model.predict(delRstim)).to('cuda')
-    eval_dataset = TensorDataset(My_train_hat, torch.Tensor(Rresp).to('cuda'))
-    eval_dataloader = DataLoader(eval_dataset, batch_size=32, shuffle=False)
+    if args.y_projection == 'dm':
+        My_train_hat = torch.Tensor(linear_model.predict(delRstim)).to('cuda')
+        y_hat = get_up_projections_torch(My_train_hat, Rresp, up_projection_map_y)
+    else:
+        y_hat = up_projection_map_y(My_train_hat)    
 
-    preds = []
+    print('TRAIN metrics in response space============================')
+    R2_response, correlations_response = print_stats(y_hat, Rresp)
 
-    model.eval()
-    for x_batch, _ in eval_dataloader:
-        with torch.no_grad():
-            pred = model(x_batch).detach().cpu().numpy()
-            preds.append(pred)
+    print('TEST metrics in response space==============================')
+    y_test_hat = up_projection_map_y(My_test_hat)
+    R2_response_test, correlations_response_test = print_stats(y_test_hat, Presp)
 
-    preds = np.vstack(preds)
-    Rresp_cpu = Rresp.cpu().numpy()
-    print(r2_score(preds, Rresp_cpu))
-    print(np.corrcoef(preds, Rresp_cpu))
+    results = {
+        'params': vars(args),
+        'R2_M': float(R2_M),
+        'R2_M_test': R2_M_test,
+        'R2_response': R2_response,
+        'R2_response_test': R2_response_test,
+        'correlations_M': correlations_M,
+        'correlations_M_test': correlations_M_test,
+        'correlations_response': correlations_response,
+        'correlations_response_test': correlations_response_test
+    }
 
-    # Test
-    # step 1: project test stim 
-    print('Projecting x')
-    X_test = delPstim
-
-    # step 2: project test response
-    print('Projecting y')
-    Presp_projected = dmap_y.transform(Presp)
-
-    # step 3: apply linear map to reduced X, eval R^2 in reduced space
-    My_test_hat = linear_model.predict(X_test)
-    print('Test metrics in M space')
-    print('R2 in reduced space: ', r2_score(My_test_hat, Presp_projected))
-    print('Correlation in reduced space: ', np.mean([pearsonr(My_test_hat[i], Presp_projected[i])[0] for i in range(len(My_test_hat))]))
-
-    # step 4: apply inv. map to M and eval R^2 in og space
-    Presp_hat = model(My_test_hat)
-    Presp_hat = Presp_hat.cpu().numpy()
-    print('Test metrics in original space')
-    print('Test R2: ', r2_score(Presp_hat, Presp))
-    print('Test Correlation: ', np.mean([pearsonr(Presp_hat[i], Presp[i])[0] for i in range(len(Presp_hat))]))
+    with open(f'results_{args.n_evecs}_{args.y_projection}.json', 'w') as f:
+        json.dump(results, f)
