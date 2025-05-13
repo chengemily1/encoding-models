@@ -1,18 +1,20 @@
 import numpy as np
 import logging
-
+import pdb 
 logger = logging.getLogger("text.regression.interpdata")
 
 def interpdata(data, oldtime, newtime):
     """Interpolates the columns of [data] to find the values at [newtime], given that the current
     values are at [oldtime].  [oldtime] must have the same number of elements as [data] has rows.
+
+    data = N x L layers x D
     """
     ## Check input sizes ##
     if not len(oldtime) == data.shape[0]:
         raise IndexError("oldtime must have same number of elements as data has rows.")
     
     ## Set up matrix to hold output ##
-    newdata = np.empty((len(newtime), data.shape[1]))
+    newdata = np.empty((len(newtime), data.shape[1], data.shape[2]))
     
     ## Interpolate each column of data ##
     for ci in range(data.shape[1]):
@@ -106,7 +108,10 @@ def lanczosinterp2D(data, oldtime, newtime, window=3, cutoff_mult=1.0, rectify=F
                             np.dot(sincmat, np.clip(data, 0, np.inf))])
     else:
         ## Construct new signal by multiplying the sinc matrix by the data ##
-        newdata = np.dot(sincmat, data)
+        if len(data.shape) == 2:
+            newdata = np.dot(sincmat, data)
+        else:
+            newdata = np.einsum('mn,nld->mld', sincmat, data) # old: np.dot(sincmat, data)
 
     return newdata
 

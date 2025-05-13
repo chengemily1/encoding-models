@@ -20,19 +20,20 @@ import pdb
 from scipy.stats import pearsonr
 from tqdm import tqdm
 import json
+
 # Repository imports
 from ridge_utils.ridge import bootstrap_ridge
 import ridge_utils.npp
 from ridge_utils.util import make_delayed
 from ridge_utils.dsutils import make_word_ds
 from ridge_utils.DataSequence import DataSequence
-from ridge_utils.tokenization_helpers import generate_efficient_feat_dicts_opt
-from ridge_utils.tokenization_helpers import convert_to_feature_mats_opt
+from ridge_utils.tokenization_helpers import generate_efficient_feat_dicts_opt, convert_to_feature_mats_opt, generate_efficient_feat_dicts_llama, convert_to_feature_mats_llama
 
 from manifold_utils.projection import down_project, get_up_projection_map, get_up_projections_torch
 from manifold_utils.algorithms import *
-from manifold_utils.constants import *  
+from manifold_utils.constants import *
 from manifold_utils.utils import print_stats
+from manifold_utils.feature_extraction import FeatureExtractor
 
 def test(x_project, linear, inv_map):
     """
@@ -48,9 +49,11 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="facebook/opt-125m")
     parser.add_argument("--y_projection", type=str, default="pca", choices=['pca', 'dm', 'I']) # I is identity projection
-    parser.add_argument("--layer", type=int, default=9)
+    parser.add_argument('--which_layers', type=str, default='single', help='feature selection algo', choices=['single', 'all', 'idCorr'])
+    parser.add_argument("--n_layers", type=int, default=1, help="How many layers we want to include from the model")
+    parser.add_argument("--seed_layer", type=int, default=9, help="the first layer to include (only layer is n_layers=1)") 
     parser.add_argument("--n_evecs", type=float, default=1000)
-    parser.add_argument("--alpha", type=float, default=0.5)
+    parser.add_argument("--alpha", type=float, default=0.5, help="alpha in ridge regression")
     parser.add_argument("--k", type=int, default=64)
     parser.add_argument("--autoencoder_epochs", type=int, default=1000)
     parser.add_argument("--autoencoder_lr", type=float, default=1e-3)
@@ -69,7 +72,7 @@ if __name__ == "__main__":
     resp_dict = joblib.load("UTS03_responses.jbl") # Located in story_responses folder
 
     # We'll build an encoding model using this set of stories for this tutorial.
-    test_stories = ["wheretheressmoke", 'fromboyhoodtofatherhood', 'onapproachtopluto'] 
+    test_stories = ["wheretheressmoke", 'fromboyhoodtofatherhood', 'onapproachtopluto']
     train_stories = [story for story in resp_dict.keys() if story in grids and story not in test_stories]
 
     # Filter out the other stories for the tutorial
@@ -82,41 +85,49 @@ if __name__ == "__main__":
     wordseqs = make_word_ds(grids, trfiles)
 
     # We will be using a sliding context window with minimum size 256 words that increases until size 512 words.
-    tokenizer = AutoTokenizer.from_pretrained(args.model) # Same tokenizer for all sizes
+    # tokenizer = AutoTokenizer.from_pretrained(args.model) # Same tokenizer for all sizes
 
     # Make dictionary to align tokens and words
-    text_dict, text_dict2, text_dict3 = generate_efficient_feat_dicts_opt(wordseqs, tokenizer, 256, 512)
+    # TODO make compatible with tokenizers
+    # text_dict, text_dict2, text_dict3 = generate_efficient_feat_dicts_opt(wordseqs, tokenizer, 256, 512)
 
-    # We are going to use the 125m parameter model for this tutorial, but any size should work 
-    model = AutoModelForCausalLM.from_pretrained(args.model, device_map='auto')
-    print('Loaded model and tokenizer')
+    # Load the model
+    # model = AutoModelForCausalLM.from_pretrained(args.model, device_map='auto')
+    # print('Loaded model and tokenizer')
 
-    # We will extract features from the 9th layer of the model
-    LAYER_NUM = args.layer
+    # We will extract features now
+    feature_extractor = FeatureExtractor(wordseqs, args.model)
+    # LAYER_NUM = args.seed_layer
 
-    start_time = time.time()
-    print('Extracting features')
-    for phrase in tqdm(text_dict2):
-        if text_dict2[phrase]:
-            inputs = {}
-            inputs['input_ids'] = torch.tensor([text_dict[phrase]]).int().to(model.device)
-            inputs['attention_mask'] = torch.ones(inputs['input_ids'].shape).to(model.device)
-            out = list(model(**inputs, output_hidden_states=True)[2])
-            out = out[LAYER_NUM][0].cpu().detach().numpy()
-            out = np.array(out)
-            this_key = tuple(inputs['input_ids'][0].cpu().detach().numpy())
-            acc_true = 0
-            for ei, i in enumerate(this_key):
-                if this_key[:ei+1] in text_dict3:
-                    acc_true += 1
-                    text_dict3[this_key[:ei+1]] = out[ei,:]
-    end_time = time.time()
+    # start_time = time.time()
+    # print('Extracting features')
+    # for phrase in tqdm(text_dict2):
+    #     if text_dict2[phrase]:
+    #         inputs = {}
+    #         inputs['input_ids'] = torch.tensor([text_dict[phrase]]).int().to(model.device)
+    #         inputs['attention_mask'] = torch.ones(inputs['input_ids'].shape).to(model.device)
+    #         out = list(model(**inputs, output_hidden_states=True)[2])
+    #         out = out[LAYER_NUM][0].cpu().detach().numpy()
+    #         out = np.array(out)
 
-    print("Feature extraction took", end_time - start_time, "seconds on", model.device)
+    #         this_key = tuple(inputs['input_ids'][0].cpu().detach().numpy())
+    #         acc_true = 0
+    #         for ei, i in enumerate(this_key):
+    #             if this_key[:ei+1] in text_dict3:
+    #                 acc_true += 1
+    #                 text_dict3[this_key[:ei+1]] = out[ei,:]
+    # end_time = time.time()
+
+    # print("Feature extraction took", end_time - start_time, "seconds on", model.device)
+    # del model # memory management
 
     # Convert back from dictionary to matrix
+    feats = feature_extractor.get_features(args.which_layers, seed_layer=args.seed_layer) # N stories x L layers x d (previously N stories x d)
 
-    feats = convert_to_feature_mats_opt(wordseqs, tokenizer, 256, 512, text_dict3)
+    # pdb.set_trace()
+    # feats = convert_to_feature_mats_opt(wordseqs, tokenizer, 256, 512, text_dict3)
+    # print('What is the dimension of feats')
+    pdb.set_trace()
 
     #Training data
     Rstim = np.nan_to_num(np.vstack([ridge_utils.npp.zs(feats[story][10:-5]) for story in train_stories]))
@@ -155,18 +166,18 @@ if __name__ == "__main__":
 
     print('TEST metrics in M space==============================')
     My_test_hat = linear_model.predict(Mx_test)
-    R2_M_test, correlations_M_test = print_stats(My_test_hat, My_test)  
+    R2_M_test, correlations_M_test = print_stats(My_test_hat, My_test)
 
     # Make sure we can project back up to the original space.
     # step 4: learn a map from the projected response back up to the original
     up_projection_map_y = get_up_projection_map(args, My_train, Rresp, Presp, project_type=args.y_projection, projection_map_y=projection_map_y)
-    
+
     # step 5: evaluate the R^2 in the original space
     if args.y_projection == 'dm':
         My_train_hat = torch.Tensor(linear_model.predict(delRstim)).to('cuda')
         y_hat = get_up_projections_torch(My_train_hat, Rresp, up_projection_map_y)
     else:
-        y_hat = up_projection_map_y(My_train_hat)    
+        y_hat = up_projection_map_y(My_train_hat)
 
     print('TRAIN metrics in response space============================')
     R2_response, correlations_response = print_stats(y_hat, Rresp)
@@ -186,6 +197,11 @@ if __name__ == "__main__":
         'correlations_response': correlations_response,
         'correlations_response_test': correlations_response_test
     }
+    model_str = args.model.split('/')[-1]
 
-    with open(f'results_{args.n_evecs}_{args.y_projection}.json', 'w') as f:
+    # Save
+    save_dir = f'/home/echeng/encoding-models/results/{model_str}'
+    os.makedirs(save_dir, exist_ok=True)
+
+    with open(f'{save_dir}/results_layer_{args.layer}_rank_{args.n_evecs}_{args.y_projection}.json', 'w') as f:
         json.dump(results, f)

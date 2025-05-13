@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import torch
 from ridge_utils.DataSequence import DataSequence
 from transformers import AutoTokenizer, AutoModelForCausalLM
-
+import pdb
 
 ### Warning, you are entering tokenization hell.
 
@@ -130,10 +130,10 @@ def convert_to_feature_mats_opt(wordseqs, tokenizer, lookback1, lookback2, text_
         acc = []
         acc8 = 0
         text = [" ".join(ds.data)]
-        text_len = len(text[0])
         inputs = tokenizer(text, return_tensors="pt")
         tokens = np.array(inputs['input_ids'][0])
         assert (27 not in tokens)
+
         # Annotate word boundaries
         for ei,i in enumerate(tokens):
             # A lot of tokenization edge cases
@@ -187,7 +187,13 @@ def convert_to_feature_mats_opt(wordseqs, tokenizer, lookback1, lookback2, text_
             acc_lookback += 1
             if i == total_len - 1:
                 text_dict2[(story, i)] = True
-        featureseqs[story] = DataSequence(np.array(newdata), ds.split_inds, ds.data_times, ds.tr_times)
+
+        # print('look at the shape of newdata')
+        # pdb.set_trace()
+        newdata = np.array(newdata) # originally total_len x d, now total_len x L layers x d
+        # newdata = np.transpose(newdata, axes=[0, 1]) # Now it's 1 x layers x d
+        featureseqs[story] = DataSequence(newdata, ds.split_inds, ds.data_times, ds.tr_times)
+        
     downsampled_featureseqs = {}
     for story in featureseqs:
         downsampled_featureseqs[story] = featureseqs[story].chunksums('lanczos', window=3)

@@ -49,7 +49,7 @@ class DataSequence(object):
         (this is assuming that [data] is a numpy array) and returns the resulting matrix with
         one row per chunk.
         """
-        dsize = self.data.shape[1]
+        dsize = self.data.shape[-1]
         outmat = np.zeros((len(self.split_inds)+1, dsize))
         for ci, c in enumerate(self.chunks()):
             if len(c):
@@ -79,7 +79,7 @@ class DataSequence(object):
             ## downsample using Gabor filter
             return np.abs(gabor_xfm2D(self.data.T, self.data_times, self.tr_times, **kwargs)).T
         else:
-            dsize = self.data.shape[1]
+            dsize = self.data.shape[-1]
             outmat = np.zeros((len(self.split_inds)+1, dsize))
             for ci, c in enumerate(self.chunks()):
                 if len(c):
