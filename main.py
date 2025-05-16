@@ -84,17 +84,6 @@ if __name__ == "__main__":
     # Make datasequence for story
     wordseqs = make_word_ds(grids, trfiles)
 
-    # We will be using a sliding context window with minimum size 256 words that increases until size 512 words.
-    # tokenizer = AutoTokenizer.from_pretrained(args.model) # Same tokenizer for all sizes
-
-    # Make dictionary to align tokens and words
-    # TODO make compatible with tokenizers
-    # text_dict, text_dict2, text_dict3 = generate_efficient_feat_dicts_opt(wordseqs, tokenizer, 256, 512)
-
-    # Load the model
-    # model = AutoModelForCausalLM.from_pretrained(args.model, device_map='auto')
-    # print('Loaded model and tokenizer')
-
     # We will extract features now
     feature_extractor = FeatureExtractor(wordseqs, args.model)
     # LAYER_NUM = args.seed_layer
@@ -119,7 +108,6 @@ if __name__ == "__main__":
     # end_time = time.time()
 
     # print("Feature extraction took", end_time - start_time, "seconds on", model.device)
-    # del model # memory management
 
     # Convert back from dictionary to matrix
     feats = feature_extractor.get_features(args.which_layers, seed_layer=args.seed_layer) # N stories x L layers x d (previously N stories x d)
@@ -127,7 +115,6 @@ if __name__ == "__main__":
     # pdb.set_trace()
     # feats = convert_to_feature_mats_opt(wordseqs, tokenizer, 256, 512, text_dict3)
     # print('What is the dimension of feats')
-    pdb.set_trace()
 
     #Training data
     Rstim = np.nan_to_num(np.vstack([ridge_utils.npp.zs(feats[story][10:-5]) for story in train_stories]))

@@ -6,7 +6,7 @@ import pdb
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForCausalLM # Only necessary for feature extraction.
 
-from ridge_utils.tokenization_helpers import generate_efficient_feat_dicts_opt, convert_to_feature_mats_opt
+from ridge_utils.tokenization_helpers import generate_efficient_feat_dicts_opt, convert_to_feature_mats_opt, generate_efficient_feat_dicts_pythia, convert_to_feature_mats_pythia
 
 class FeatureExtractor:
     """
@@ -15,19 +15,29 @@ class FeatureExtractor:
     """
     def __init__(self, wordseqs, model_str: str):
         # Model and tokenizer
+        self.model_name = model_str
         self.tokenizer = AutoTokenizer.from_pretrained(model_str) # Same tokenizer for all sizes
         self.model = AutoModelForCausalLM.from_pretrained(model_str, device_map='auto')
 
         self.wordseqs = wordseqs
 
         # Input text format and model 
-        self.text_dict, self.text_dict2, self.text_dict3 = generate_efficient_feat_dicts_opt(wordseqs, self.tokenizer, 256, 512)
+        generate_efficient_feat_dicts = self._get_efficient_feat_dicts_generator()
+        self.text_dict, self.text_dict2, self.text_dict3 = generate_efficient_feat_dicts(wordseqs, self.tokenizer, 256, 512)
 
         # Features stored in self.text_dict3
         self.text_dict3 = self._extract_features()
 
         # Memory management
         del self.model 
+
+    def _get_efficient_feat_dicts_generator(self):
+        if 'opt' in self.model_name:
+            return generate_efficient_feat_dicts_opt
+        elif 'pythia' in self.model_name:
+            return generate_efficient_feat_dicts_pythia
+        else:
+            raise ValueError(f"Model {self.model_name} not supported for feature extraction.")
 
 
     def _extract_features(self):
@@ -61,21 +71,32 @@ class FeatureExtractor:
             selection_method (str): selection_method in "single layer", "idCorr"
 
         Returns:
-            np.array : feature matrix N x d
+            dict {story_name (str): features np.array} : Each feature matrix is N x d
         """
-        # result is N x L layers x d dimensions
+        assert selection_method in ['single', 'all', 'idCorr'], "selection_method must be one of ['single', 'all', 'idCorr']"
+
+        
+        # result is {story_name: N x L layers x d dimensions}
         result = convert_to_feature_mats_opt(self.wordseqs, self.tokenizer, 256, 512, self.text_dict3)
-        N, L, d = result.shape
 
         # memory management
         del self.tokenizer
 
         # Select features
-        if selection_method == 'single layer':
-            return result[:,seed_layer,:].squeeze(1)
+        if selection_method == 'single':
+            result_feature_selected = {result[story][:,seed_layer,:] for story in result}
         elif selection_method == 'all':
-            return np.reshape(result, (N, L * d))
+            result_feature_selected = {}
+            for story in result:
+                result_feature_selected[story] = np.reshape(result[story], (result[story].shape[0], -1))
         elif selection_method == 'idCorr':
             # TODO needs to be implemented
             pass 
+
+        assert np.all([len(result_feature_selected[story].shape) == 2 for story in result_feature_selected]), "Feature selection failed, not 2D"
+        
+        # Memory management
+        del result
+
+        return result_feature_selected
         
