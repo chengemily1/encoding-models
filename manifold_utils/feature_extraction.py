@@ -63,6 +63,12 @@ class FeatureExtractor:
 
         return self.text_dict3
     
+    def _get_features_getter(self):
+        if 'opt' in self.model_name:
+            return convert_to_feature_mats_opt
+        elif 'pythia' in self.model_name:
+            return convert_to_feature_mats_pythia
+    
 
     def get_features(self, selection_method: str, seed_layer = None):
         """
@@ -75,16 +81,17 @@ class FeatureExtractor:
         """
         assert selection_method in ['single', 'all', 'idCorr'], "selection_method must be one of ['single', 'all', 'idCorr']"
 
-        
+
         # result is {story_name: N x L layers x d dimensions}
-        result = convert_to_feature_mats_opt(self.wordseqs, self.tokenizer, 256, 512, self.text_dict3)
+        convert_to_feature_mats = self._get_features_getter()
+        result = convert_to_feature_mats(self.wordseqs, self.tokenizer, 256, 512, self.text_dict3)
 
         # memory management
         del self.tokenizer
 
         # Select features
         if selection_method == 'single':
-            result_feature_selected = {result[story][:,seed_layer,:] for story in result}
+            result_feature_selected = {story: result[story][:,seed_layer,:] for story in result}
         elif selection_method == 'all':
             result_feature_selected = {}
             for story in result:

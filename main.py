@@ -190,5 +190,5 @@ if __name__ == "__main__":
     save_dir = f'/home/echeng/encoding-models/results/{model_str}'
     os.makedirs(save_dir, exist_ok=True)
 
-    with open(f'{save_dir}/results_layer_{args.layer}_rank_{args.n_evecs}_{args.y_projection}.json', 'w') as f:
+    with open(f'{save_dir}/results_{args.which_layers}_n_layers_{args.n_layers}_seed_layer_{args.seed_layer}_y_rank_{args.n_evecs}_{args.y_projection}.json', 'w') as f:
         json.dump(results, f)

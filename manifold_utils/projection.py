@@ -54,7 +54,8 @@ def down_project(x, project_type='pca', n_evecs=0.97):
     Down-projects x to n_evecs using PCA or DM
     """
     if project_type == 'pca':
-        if n_evecs.is_integer(): n_evecs = int(n_evecs)
+        if type(n_evecs) == float:
+            if n_evecs.is_integer(): n_evecs = int(n_evecs)
 
         pca = PCA(n_components=n_evecs, whiten=True)
         # project x onto the n eigenvectors set by n_evecs
