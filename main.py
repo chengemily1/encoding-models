@@ -4,9 +4,7 @@ import logging
 import sys
 import time
 import joblib
-import matplotlib.pyplot as plt
 import torch
-import cortex # This dependency is pycortex, which enables the plotting of flatmaps. It can be disabled.
 from cvxopt import matrix, solvers # Only necessary for the stacked model.
 from transformers import AutoTokenizer, AutoModelForCausalLM # Only necessary for feature extraction.
 from pydiffmap import diffusion_map as dm
@@ -14,12 +12,12 @@ from sklearn.linear_model import Ridge, LinearRegression
 import time
 import argparse
 import os
-from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import r2_score
 import pdb
-from scipy.stats import pearsonr
 from tqdm import tqdm
 import json
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Repository imports
 from ridge_utils.ridge import bootstrap_ridge
@@ -32,7 +30,7 @@ from ridge_utils.tokenization_helpers import generate_efficient_feat_dicts_opt, 
 from manifold_utils.projection import down_project, get_up_projection_map, get_up_projections_torch
 from manifold_utils.algorithms import *
 from manifold_utils.constants import *
-from manifold_utils.utils import print_stats
+from manifold_utils.utils import get_stats
 from manifold_utils.feature_extraction import FeatureExtractor
 
 def test(x_project, linear, inv_map):
@@ -53,8 +51,9 @@ def parse_args():
     parser.add_argument("--n_layers", type=int, default=1, help="How many layers we want to include from the model")
     parser.add_argument("--seed_layer", type=int, default=9, help="the first layer to include (only layer is n_layers=1)") 
     parser.add_argument("--n_evecs", type=float, default=1000)
-    parser.add_argument("--alpha", type=float, default=0.5, help="alpha in ridge regression")
+    parser.add_argument("--alpha", type=float, default=0.05, help="alpha in ridge regression")
     parser.add_argument("--k", type=int, default=64)
+    parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument("--autoencoder_epochs", type=int, default=1000)
     parser.add_argument("--autoencoder_lr", type=float, default=1e-3)
 
@@ -85,55 +84,31 @@ if __name__ == "__main__":
     wordseqs = make_word_ds(grids, trfiles)
 
     # We will extract features now
-    feature_extractor = FeatureExtractor(wordseqs, args.model)
-    # LAYER_NUM = args.seed_layer
-
-    # start_time = time.time()
-    # print('Extracting features')
-    # for phrase in tqdm(text_dict2):
-    #     if text_dict2[phrase]:
-    #         inputs = {}
-    #         inputs['input_ids'] = torch.tensor([text_dict[phrase]]).int().to(model.device)
-    #         inputs['attention_mask'] = torch.ones(inputs['input_ids'].shape).to(model.device)
-    #         out = list(model(**inputs, output_hidden_states=True)[2])
-    #         out = out[LAYER_NUM][0].cpu().detach().numpy()
-    #         out = np.array(out)
-
-    #         this_key = tuple(inputs['input_ids'][0].cpu().detach().numpy())
-    #         acc_true = 0
-    #         for ei, i in enumerate(this_key):
-    #             if this_key[:ei+1] in text_dict3:
-    #                 acc_true += 1
-    #                 text_dict3[this_key[:ei+1]] = out[ei,:]
-    # end_time = time.time()
-
-    # print("Feature extraction took", end_time - start_time, "seconds on", model.device)
+    feature_extractor = FeatureExtractor(wordseqs, args.model, train_stories, test_stories)
 
     # Convert back from dictionary to matrix
+    print('getting features')
     feats = feature_extractor.get_features(args.which_layers, seed_layer=args.seed_layer) # N stories x L layers x d (previously N stories x d)
-
-    # pdb.set_trace()
-    # feats = convert_to_feature_mats_opt(wordseqs, tokenizer, 256, 512, text_dict3)
-    # print('What is the dimension of feats')
-
+    print('got the features')
+    
     #Training data
     Rstim = np.nan_to_num(np.vstack([ridge_utils.npp.zs(feats[story][10:-5]) for story in train_stories]))
 
     #Test data
     Pstim = np.nan_to_num(np.vstack([ridge_utils.npp.zs(feats[story][trim_start:-trim_end]) for story in test_stories]))
-
+    print('here')
     # Add FIR delays
     delRstim = make_delayed(Rstim, delays)
     delPstim = make_delayed(Pstim, delays)
-
+    print('fir')
     # Get response data
     Rresp = np.vstack([resp_dict[story] for story in train_stories])
     Presp = np.vstack([resp_dict[story][40:] for story in test_stories])
-
+    print('response')
     # Get explanatory variables
     Mx_train = delRstim
     Mx_test = delPstim
-
+    print('111')
     # step 2: project the response to low dimensions
     print('Projecting y')
     t = time.time()
@@ -144,16 +119,16 @@ if __name__ == "__main__":
     print(f'Ran in {time.time() - t:.2f}s')
 
     # eval R^2
-    linear_model = Ridge(alpha=0.05)
+    linear_model = Ridge(alpha=args.alpha)
     linear_model.fit(Mx_train, My_train)
 
     print('TRAIN metrics in M space=============================')
     My_train_hat = linear_model.predict(Mx_train)
-    R2_M, correlations_M = print_stats(My_train_hat, My_train)
+    R2_M, correlations_M = get_stats(My_train_hat, My_train)
 
     print('TEST metrics in M space==============================')
     My_test_hat = linear_model.predict(Mx_test)
-    R2_M_test, correlations_M_test = print_stats(My_test_hat, My_test)
+    R2_M_test, correlations_M_test = get_stats(My_test_hat, My_test)
 
     # Make sure we can project back up to the original space.
     # step 4: learn a map from the projected response back up to the original
@@ -166,12 +141,12 @@ if __name__ == "__main__":
     else:
         y_hat = up_projection_map_y(My_train_hat)
 
-    print('TRAIN metrics in response space============================')
-    R2_response, correlations_response = print_stats(y_hat, Rresp)
+    print('TRAIN metrics in response space============================')    
+    R2_response, correlations_response = get_stats(y_hat, Rresp)
 
     print('TEST metrics in response space==============================')
     y_test_hat = up_projection_map_y(My_test_hat)
-    R2_response_test, correlations_response_test = print_stats(y_test_hat, Presp)
+    R2_response_test, correlations_response_test = get_stats(y_test_hat, Presp)
 
     results = {
         'params': vars(args),
@@ -190,5 +165,5 @@ if __name__ == "__main__":
     save_dir = f'/home/echeng/encoding-models/results/{model_str}'
     os.makedirs(save_dir, exist_ok=True)
 
-    with open(f'{save_dir}/results_{args.which_layers}_n_layers_{args.n_layers}_seed_layer_{args.seed_layer}_y_rank_{args.n_evecs}_{args.y_projection}.json', 'w') as f:
+    with open(f'{save_dir}/results_{args.which_layers}_n_layers_{args.n_layers}_seed_layer_{args.seed_layer}_y_rank_{args.n_evecs}_{args.y_projection}_ridge_{args.alpha}.json', 'w') as f:
         json.dump(results, f)

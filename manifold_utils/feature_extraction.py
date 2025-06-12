@@ -1,4 +1,4 @@
-import typing
+from typing import Iterable
 import torch
 import time 
 from tqdm import tqdm 
@@ -7,19 +7,26 @@ import numpy as np
 from transformers import AutoTokenizer, AutoModelForCausalLM # Only necessary for feature extraction.
 
 from ridge_utils.tokenization_helpers import generate_efficient_feat_dicts_opt, convert_to_feature_mats_opt, generate_efficient_feat_dicts_pythia, convert_to_feature_mats_pythia
+from manifold_utils.id_corr import pick_two
 
 class FeatureExtractor:
     """
         This class takes as input a model and text inputs,
         then selects the relevant features.
     """
-    def __init__(self, wordseqs, model_str: str):
+    def __init__(self, wordseqs, model_str: str, train_stories: Iterable[str], test_stories: Iterable[str], device='cuda'):
         # Model and tokenizer
         self.model_name = model_str
         self.tokenizer = AutoTokenizer.from_pretrained(model_str) # Same tokenizer for all sizes
-        self.model = AutoModelForCausalLM.from_pretrained(model_str, device_map='auto')
+        self.model = AutoModelForCausalLM.from_pretrained(model_str, device_map='auto').to(device)
+        self.device = device
 
+        # Data
         self.wordseqs = wordseqs
+        if 'pythia' in self.model_name:
+            self._pythia_specific_cleanup()
+        self.train_stories = train_stories 
+        self.test_stories = test_stories
 
         # Input text format and model 
         generate_efficient_feat_dicts = self._get_efficient_feat_dicts_generator()
@@ -30,7 +37,19 @@ class FeatureExtractor:
 
         # Memory management
         del self.model 
+        print('Deleted model')
 
+    def _pythia_specific_cleanup(self):
+        for es, story in enumerate(self.wordseqs.keys()):
+            data = []
+            data_times = []
+            for ei, i in enumerate(self.wordseqs[story].data):
+                if i.strip() != "" and i[0] != '{':
+                    data.append(i.strip())
+                    data_times.append(self.wordseqs[story].data_times[ei])
+            self.wordseqs[story].data = data
+            self.wordseqs[story].data_times = data_times
+        
     def _get_efficient_feat_dicts_generator(self):
         if 'opt' in self.model_name:
             return generate_efficient_feat_dicts_opt
@@ -68,7 +87,9 @@ class FeatureExtractor:
             return convert_to_feature_mats_opt
         elif 'pythia' in self.model_name:
             return convert_to_feature_mats_pythia
-    
+        else:
+            raise ValueError(f"Model {self.model_name} not supported for feature extraction.")
+
 
     def get_features(self, selection_method: str, seed_layer = None):
         """
@@ -81,10 +102,11 @@ class FeatureExtractor:
         """
         assert selection_method in ['single', 'all', 'idCorr'], "selection_method must be one of ['single', 'all', 'idCorr']"
 
-
         # result is {story_name: N x L layers x d dimensions}
         convert_to_feature_mats = self._get_features_getter()
+        t = time.time()
         result = convert_to_feature_mats(self.wordseqs, self.tokenizer, 256, 512, self.text_dict3)
+        print(f'Convert to feature mats took {time.time() - t} seconds')
 
         # memory management
         del self.tokenizer
@@ -92,18 +114,30 @@ class FeatureExtractor:
         # Select features
         if selection_method == 'single':
             result_feature_selected = {story: result[story][:,seed_layer,:] for story in result}
+            layer_idxs = [seed_layer]
         elif selection_method == 'all':
             result_feature_selected = {}
             for story in result:
+                L_layers = result[story].shape[1]
                 result_feature_selected[story] = np.reshape(result[story], (result[story].shape[0], -1))
+            layer_idxs = list(range(L_layers))
         elif selection_method == 'idCorr':
-            # TODO needs to be implemented
-            pass 
+            train_stories_concat = np.concatenate([result[story] for story in self.train_stories], axis=0)
+            print('get the shape of all_stores_concat, should still be L x D at the end')
+            pdb.set_trace()
+            layer_idxs = pick_two(train_stories_concat, seed_layer)
+            print('print the layer_idxs')
+            pdb.set_trace()
+            dim = train_stories_concat.shape[-1]
 
+            # {story: N x (l * D)}
+            result_feature_selected = {story: np.reshape(result[story][:, layer_idxs, :], (result[story].shape[0], len(layer_idxs) * dim)) for story in result}
+        
+        self.layer_idxs = layer_idxs
         assert np.all([len(result_feature_selected[story].shape) == 2 for story in result_feature_selected]), "Feature selection failed, not 2D"
         
         # Memory management
         del result
 
+        # Across train and test
         return result_feature_selected
-        
