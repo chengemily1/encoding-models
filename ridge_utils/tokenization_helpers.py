@@ -7,9 +7,207 @@ import torch
 from ridge_utils.DataSequence import DataSequence
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import pdb
+from tqdm import tqdm 
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 
 ### Warning, you are entering tokenization hell.
 
+def downsample_story(story, features):
+    return story, features.chunksums('lanczos', window=3)
+
+
+### PYTHIA STUFF
+def compute_correct_tokens_pythia(acc, acc_lookback, acc_offset, total_len):
+    new_tokens = [1]
+    acc_count_all = 0
+    first_word = max(0,acc_offset-acc_lookback)
+    last_word = min(acc_offset+1, total_len)
+    acc_start = 0
+    while acc_start != first_word + 1:
+        if acc[acc_count_all] == 100000:
+            acc_start += 1
+            acc_count_all += 1
+        else:
+            acc_count_all += 1
+    
+    acc2 = acc[acc_count_all:]
+    acc_count8 = 0
+    acc_count_all = 0
+    while acc_count8 != (last_word - first_word):
+        if acc2[acc_count_all] == 100000:
+            acc_count8 += 1
+            acc_count_all += 1
+        else:
+            new_tokens.append(acc2[acc_count_all])
+            acc_count_all += 1
+    return new_tokens
+
+def generate_efficient_feat_dicts_pythia(wordseqs, tokenizer, lookback1, lookback2):
+    text_dict = {}
+    text_dict2 = {}
+    text_dict3 = {}
+    for es, story in enumerate(wordseqs.keys()):
+        # print(story)
+        ds = wordseqs[story]
+        newdata = []
+        total_len = len(ds.data)
+        text = " ".join(ds.data)
+        if text[0] != " ":
+            text = " " + text 
+        inputs = tokenizer(text, return_tensors="pt")
+        tokens = np.array(inputs['input_ids'][0])
+        assert (100000 not in tokens)
+        acc = []
+        acc8 = 0
+        acc_words = 0
+        for ei,i in enumerate(tokens):
+            if tokenizer.convert_ids_to_tokens(torch.tensor([i]))[0][0] == 'Ġ'  or ei == 0:
+                acc.append(100000)
+                acc.append(i)
+                acc8 += 1
+            else:
+                acc.append(i)
+        decoded = tokenizer.decode(torch.tensor(acc))
+        acc_words = 0
+        for i in ds.data:
+            if i.strip() != '':
+                acc_words += 1
+        # print(acc8, acc_words, story, es)
+        assert acc8 == acc_words
+        acc.append(100000)
+        acc_lookback = 0
+        misc_offset = 0
+        new_tokens = []
+        for i, w in enumerate(ds.data):
+            if w.strip() != '' and w != "'s":
+                if acc_lookback < lookback1:
+                    new_tokens = compute_correct_tokens_pythia(acc, acc_lookback, i + misc_offset, total_len)
+                    text_dict[(story, i)] = new_tokens
+                    text_dict2[(story, i)] = False
+                    text_dict3[tuple(new_tokens)] = False
+                elif lookback2 > acc_lookback and acc_lookback >= lookback1:
+                    new_tokens = compute_correct_tokens_pythia(acc, acc_lookback, i + misc_offset, total_len)
+                    text_dict[(story, i)] = new_tokens
+                    text_dict2[(story, i)] = False
+                    text_dict3[tuple(new_tokens)] = False
+                elif acc_lookback == lookback2:
+                    new_tokens = compute_correct_tokens_pythia(acc, acc_lookback, i + misc_offset, total_len)
+                    acc_lookback = lookback1
+                    text_dict[(story, i)] = new_tokens
+                    text_dict2[(story, i)] = True
+                    text_dict3[tuple(new_tokens)] = False
+                else:
+                    print("WARNING, LOOKBACK EDGE CASE 1", acc_lookback, "\n")
+                    assert False
+                    text_dict[(story, i)] = new_tokens
+                    text_dict2[(story, i)] = False
+                    text_dict3[tuple(new_tokens)] = False
+            else:
+                text_dict[(story, i)] = new_tokens
+                text_dict2[(story, i)] = True
+                text_dict3[tuple(new_tokens)] = False
+                acc_lookback += 1
+                misc_offset -= 1
+                continue
+            acc_lookback += 1
+            if i == total_len - 1:
+                text_dict2[(story, i)] = True
+    return text_dict, text_dict2, text_dict3
+
+def convert_to_feature_mats_pythia(wordseqs, tokenizer, lookback1, lookback2, text_dict3):
+    text_dict = {}
+    text_dict2 = {}
+    featureseqs = {}
+
+    for es, story in tqdm(enumerate(wordseqs.keys())):
+        ds = wordseqs[story]
+        newdata = []
+        total_len = len(ds.data)
+        text = " ".join(ds.data)
+        if text[0] != " ":
+            text = " " + text 
+        
+        inputs = tokenizer(text, return_tensors="pt")
+
+        tokens = np.array(inputs['input_ids'][0])
+        assert (100000 not in tokens)
+        acc = []
+        acc8 = 0
+        acc_words = 0
+
+        for ei,i in enumerate(tokens):
+            if tokenizer.convert_ids_to_tokens(torch.tensor([i]))[0][0] == 'Ġ'  or ei == 0:
+                acc.append(100000)
+                acc.append(i)
+                acc8 += 1
+            else:
+                acc.append(i)
+        decoded = tokenizer.decode(torch.tensor(acc))
+        acc_words = 0
+        for i in ds.data:
+            if i.strip() != '':
+                acc_words += 1
+            else:
+                print("Empty")
+
+        assert acc8 == acc_words
+        acc.append(100000)
+        acc_lookback = 0
+        misc_offset = 0
+        new_tokens = []
+
+        for i, w in enumerate(ds.data):
+            if w.strip() != '' and w != "'s":
+                if acc_lookback < lookback1:
+                    new_tokens = compute_correct_tokens_pythia(acc, acc_lookback, i + misc_offset, total_len)
+                    text_dict[(story, i)] = new_tokens
+                    text_dict2[(story, i)] = False
+                    newdata.append(text_dict3[tuple(new_tokens)])
+                elif lookback2 > acc_lookback and acc_lookback >= lookback1:
+                    new_tokens = compute_correct_tokens_pythia(acc, acc_lookback, i + misc_offset, total_len)
+                    text_dict[(story, i)] = new_tokens
+                    text_dict2[(story, i)] = False
+                    newdata.append(text_dict3[tuple(new_tokens)])
+                elif acc_lookback == lookback2:
+                    new_tokens = compute_correct_tokens_pythia(acc, acc_lookback, i + misc_offset, total_len)
+                    acc_lookback = lookback1
+                    text_dict[(story, i)] = new_tokens
+                    text_dict2[(story, i)] = True
+                    newdata.append(text_dict3[tuple(new_tokens)])
+                else:
+                    print("WARNING, LOOKBACK EDGE CASE 1", acc_lookback, "\n")
+                    assert False
+                    text_dict[(story, i)] = new_tokens
+                    text_dict2[(story, i)] = False
+                    newdata.append(text_dict3[tuple(new_tokens)])
+            else:
+                text_dict[(story, i)] = new_tokens
+                text_dict2[(story, i)] = True
+                newdata.append(text_dict3[tuple(new_tokens)])
+                acc_lookback += 1
+                misc_offset -= 1
+                continue
+            acc_lookback += 1
+            if i == total_len - 1:
+                text_dict2[(story, i)] = True
+
+        newdata = np.array(newdata)        
+        featureseqs[story] = DataSequence(np.array(newdata), ds.split_inds, ds.data_times, ds.tr_times)
+    
+    downsampled_featureseqs = {}
+    num_workers = multiprocessing.cpu_count()  # Use all available cores
+
+    with ProcessPoolExecutor(max_workers=num_workers//2) as executor:
+        futures = [executor.submit(downsample_story, story, featureseqs[story]) for story in featureseqs]
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Lanczos"):
+            story, result = future.result()
+            downsampled_featureseqs[story] = result
+
+    return downsampled_featureseqs
+
+
+### OPT STUFF
 def compute_correct_tokens_opt(acc, acc_lookback, acc_offset, total_len):
     #print(acc)
     new_tokens = []
@@ -123,7 +321,7 @@ def convert_to_feature_mats_opt(wordseqs, tokenizer, lookback1, lookback2, text_
     text_dict = {}
     text_dict2 = {}
     featureseqs = {}
-    for story in wordseqs.keys():
+    for story in tqdm(wordseqs.keys()):
         ds = wordseqs[story]
         newdata = []
         total_len = len(ds.data)
@@ -188,15 +386,18 @@ def convert_to_feature_mats_opt(wordseqs, tokenizer, lookback1, lookback2, text_
             if i == total_len - 1:
                 text_dict2[(story, i)] = True
 
-        # print('look at the shape of newdata')
-        # pdb.set_trace()
         newdata = np.array(newdata) # originally total_len x d, now total_len x L layers x d
-        # newdata = np.transpose(newdata, axes=[0, 1]) # Now it's 1 x layers x d
         featureseqs[story] = DataSequence(newdata, ds.split_inds, ds.data_times, ds.tr_times)
         
     downsampled_featureseqs = {}
-    for story in featureseqs:
-        downsampled_featureseqs[story] = featureseqs[story].chunksums('lanczos', window=3)
+    num_workers = multiprocessing.cpu_count()  # Use all available cores
+
+    with ProcessPoolExecutor(max_workers=num_workers//2) as executor:
+        futures = [executor.submit(downsample_story, story, featureseqs[story]) for story in featureseqs]
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Lanczos"):
+            story, result = future.result()
+            downsampled_featureseqs[story] = result
+
     return downsampled_featureseqs
 
 
@@ -358,7 +559,14 @@ def convert_to_feature_mats_llama(wordseqs, tokenizer, lookback1, lookback2, tex
             if i == total_len - 1:
                 text_dict2[(story, i)] = True
         featureseqs[story] = DataSequence(np.array(newdata), ds.split_inds, ds.data_times, ds.tr_times)
+
     downsampled_featureseqs = {}
-    for story in featureseqs:
-        downsampled_featureseqs[story] = featureseqs[story].chunksums('lanczos', window=3)
+    num_workers = multiprocessing.cpu_count()  # Use all available cores
+
+    with ProcessPoolExecutor(max_workers=num_workers//2) as executor:
+        futures = [executor.submit(downsample_story, story, featureseqs[story]) for story in featureseqs]
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Lanczos"):
+            story, result = future.result()
+            downsampled_featureseqs[story] = result
+
     return downsampled_featureseqs

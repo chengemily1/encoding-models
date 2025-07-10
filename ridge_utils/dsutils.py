@@ -4,6 +4,7 @@ from ridge_utils.DataSequence import DataSequence
 
 DEFAULT_BAD_WORDS = frozenset(["sentence_start", "sentence_end", "br", "lg", "ls", "ns", "sp"])
 EXTENDED_BAD_WORDS = frozenset(["sentence_start", "sentence_end", "br", "lg", "ls", "ns", "sp", "sl", "cg", "ig", "ls", ""])
+
 def make_word_ds(grids, trfiles, bad_words=DEFAULT_BAD_WORDS):
     """Creates DataSequence objects containing the words from each grid, with any words appearing
     in the [bad_words] set removed.
