@@ -5,7 +5,7 @@ from ridge_utils.utils import mult_diag, counter
 import random
 import itertools as itools
 import joblib
-
+import pdb
 from manifold_utils.projection import down_project, get_up_projection_map, get_up_projections_torch
 
 zs = lambda v: (v-v.mean(0))/v.std(0) ## z-score function
@@ -99,8 +99,13 @@ def ridge_projected(stim, resp, alpha, singcutoff=1e-10, normalpha=False, y_proj
         from text.regression.svd_dgesvd import svd_dgesvd
         U,S,Vh = svd_dgesvd(stim, full_matrices=False)
 
+    print("resp shape: ", resp.shape)
     resp = projection_map_y.transform(resp)
+
+    print("resp shape after PCA: ", resp.shape)
     UR = np.dot(U.T, np.nan_to_num(resp))
+
+    print("UR shape: ", UR.shape)
     
     # Expand alpha to a collection if it's just a single value
     if isinstance(alpha, (float,int)):
@@ -116,9 +121,12 @@ def ridge_projected(stim, resp, alpha, singcutoff=1e-10, normalpha=False, y_proj
     # Compute weights for each alpha
     ualphas = np.unique(nalphas)
     wt = np.zeros((stim.shape[1], resp.shape[1]))
+    print('wt shape: ', wt.shape)
+
     for ua in ualphas:
+        print("what is going on here")
+        pdb.set_trace()
         selvox = np.nonzero(nalphas==ua)[0]
-        #awt = reduce(np.dot, [Vh.T, np.diag(S/(S**2+ua**2)), UR[:,selvox]])
         awt = Vh.T.dot(np.diag(S/(S**2+ua**2))).dot(UR[:,selvox])
         wt[:,selvox] = awt
 
@@ -351,7 +359,7 @@ def ridge_corr(Rstim, Pstim, Rresp, Presp, alphas, normalpha=False, corrmin=0.2,
     return Rcorrs
 
 def ridge_corr_with_projection(Rstim, Pstim, Rresp, Presp, alphas, normalpha=False, corrmin=0.2,
-               singcutoff=1e-10, use_corr=True, y_projection='pca', projection_map_y=None, up_projection_map=None, logger=ridge_logger):
+               singcutoff=1e-10, use_corr=True, projection_map_y=None, up_projection_map=None, logger=ridge_logger):
     """Uses ridge regression to find a linear transformation of [Rstim] that approximates [Rresp],
     then tests by comparing the transformation of [Pstim] to [Presp]. This procedure is repeated
     for each regularization parameter alpha in [alphas]. The correlation between each prediction and
@@ -438,7 +446,7 @@ def ridge_corr_with_projection(Rstim, Pstim, Rresp, Presp, alphas, normalpha=Fal
 
     logger.info("Average difference between actual & assumed Prespvar: %0.3f" % (Prespvar_actual - Prespvar).mean())
 
-    Rcorrs = [] ## Holds training correlations for each alpha
+    Rcorrs = [] ## Holds training correlations for each alpha. N_alpha x N_vox
     for na, a in zip(nalphas, alphas):
         D = S / (S ** 2 + na ** 2) ## Reweight singular vectors by the (normalized?) ridge parameter
         
@@ -752,6 +760,7 @@ def bootstrap_ridge_with_y_projection(Rstim, Rresp, Pstim, Presp, alphas, nboots
                                )
 
     nresp, nvox = Rresp.shape
+    ncomponents = projection_map_y.n_components
 
     # Project the y variable down and be able to pass in the up-projection map to the ridge
     # in order to select alpha.
@@ -790,6 +799,9 @@ def bootstrap_ridge_with_y_projection(Rstim, Rresp, Pstim, Presp, alphas, nboots
     else:
         allRcorrs = None
     
+    print('examine what is allRcorrs')
+    print('check where we are in the next one: joined')
+    pdb.set_trace()
     if not single_alpha:
         if nboots == 0:
             raise ValueError("You must run at least one cross-validation step to assign "
@@ -803,7 +815,7 @@ def bootstrap_ridge_with_y_projection(Rstim, Rresp, Pstim, Presp, alphas, nboots
             valphas = alphas[bestalphainds]
         else:
             # Find best alpha for each group of voxels
-            valphas = np.zeros((nvox,))
+            valphas = np.zeros((ncomponents,))
             for jl in joined:
                 # Mean across voxels in the set, then mean across bootstraps
                 jcorrs = allRcorrs[:,jl,:].mean(1).mean(1)
@@ -824,12 +836,13 @@ def bootstrap_ridge_with_y_projection(Rstim, Rresp, Pstim, Presp, alphas, nboots
             bestalphaind = np.argmax(meanbootcorr)
             bestalpha = alphas[bestalphaind]
         
-        valphas = np.array([bestalpha]*nvox)
+        valphas = np.array([bestalpha]*ncomponents) # changed from * nvox as we're no longer in voxel space.
         logger.info("Best alpha = %0.3f"%bestalpha)
 
     if return_wt:
         # Find weights
         logger.info("Computing weights for each response using entire training set..")
+
         # Take into account the projections
         wt = ridge_projected(Rstim, Rresp, valphas, 
                              singcutoff=singcutoff, y_projection=y_projection, 
