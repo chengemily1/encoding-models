@@ -126,24 +126,22 @@ if __name__ == "__main__":
     print("Bootstrap ridge")
 
     # Use RJ's bootstrap ridge code modified to handle projection
-    wt, corr, alphas, bscorrs, valinds = bootstrap_ridge_with_y_projection(
+    wt, corr, best_alpha, bootstrap_corrs, valinds = bootstrap_ridge_with_y_projection(
                                                         Mx_train, My_train, Mx_test, My_test,
                                                         alphas, nboots, chunklen, nchunks,
-                                                        use_corr=False, 
-                                                        single_alpha=False, 
+                                                        up_projection_map_y, projection_map_y,
                                                         y_projection=args.y_projection,
-                                                        projection_map_y=projection_map_y,
-                                                        up_projection_map=up_projection_map_y,
                                                     )
     print("check the data type of the outputs")
 
-    bscorrs = bscorrs.squeeze() # 1 x nvox x 1
+    bootstrap_corrs = bootstrap_corrs.squeeze() # 1 x nvox x 1
+    pdb.set_trace()
     results = {
         'params': vars(args),
         'corr': list(corr), # nvox
-        'bscorrs': list(bscorrs),
+        'bscorrs': list(bootstrap_corrs),
         'val_indices': list(valinds), 
-        'alphas': list(alphas) # nvox
+        'alphas': list(best_alpha) # nvox
     }
     model_str = args.model.split('/')[-1]
 

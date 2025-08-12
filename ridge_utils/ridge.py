@@ -66,7 +66,10 @@ def ridge(stim, resp, alpha, singcutoff=1e-10, normalpha=False, logger=ridge_log
 
     return wt
 
-def ridge_projected(stim, resp, alpha, up_projection_components, projection_map_y, 
+def ridge_projected(stim, resp, alpha, 
+                    up_projection_map_y,
+                    # up_projection_components, 
+                    projection_map_y, 
                    singcutoff=1e-10, normalpha=False, logger=ridge_logger):
     """
     Performs ridge regression in projected Y space with a single alpha value.
@@ -130,7 +133,8 @@ def ridge_projected(stim, resp, alpha, up_projection_components, projection_map_
     wt_projected = Vh.T.dot(np.diag(D)).dot(UR)
     
     # Project weights back to original space
-    wt = wt_projected @ up_projection_components
+    # wt = wt_projected @ up_projection_components
+    wt = up_projection_map_y(wt_projected)
     
     return wt
     
@@ -361,7 +365,9 @@ def ridge_corr(Rstim, Pstim, Rresp, Presp, alphas, normalpha=False, corrmin=0.2,
     return Rcorrs
 
 def ridge_corr_with_projection(Rstim, Pstim, Rresp, Presp, alphas, 
-                              up_projection_components, projection_map_y,
+                            #   up_projection_components, 
+                              up_projection_map_y,
+                              projection_map_y,
                               normalpha=False, use_corr=True, 
                               singcutoff=1e-10, logger=ridge_logger):
     """
@@ -407,7 +413,9 @@ def ridge_corr_with_projection(Rstim, Pstim, Rresp, Presp, alphas,
     
     for alpha in alphas:
         # Train ridge regression in projected space
-        wt = ridge_projected(Rstim, Rresp, alpha, up_projection_components, 
+        wt = ridge_projected(Rstim, Rresp, alpha, 
+                            # up_projection_components, 
+                           up_projection_map_y,
                            projection_map_y, singcutoff=singcutoff, 
                            normalpha=normalpha, logger=logger)
         
@@ -618,7 +626,9 @@ def bootstrap_ridge(Rstim, Rresp, Pstim, Presp, alphas, nboots, chunklen, nchunk
 
 def bootstrap_ridge_with_y_projection(Rstim, Rresp, Pstim, Presp, alphas, 
                                      nboots, chunklen, nchunks,
-                                     up_projection_components, projection_map_y,
+                                    #  up_projection_components,
+                                     up_projection_map_y, 
+                                     projection_map_y,
                                      corrmin=0.2, singcutoff=1e-10, 
                                      normalpha=False, use_corr=True, 
                                      return_wt=True, y_projection='pca',
@@ -707,7 +717,9 @@ def bootstrap_ridge_with_y_projection(Rstim, Rresp, Pstim, Presp, alphas,
         # Test each alpha and evaluate in ORIGINAL space
         boot_corrs = ridge_corr_with_projection(
             RRstim, PRstim, RRresp, PRresp, alphas,
-            up_projection_components, projection_map_y,
+            # up_projection_components,
+            up_projection_map_y, 
+            projection_map_y,
             normalpha=normalpha, use_corr=use_corr, 
             singcutoff=singcutoff, logger=logger
         )
@@ -734,7 +746,9 @@ def bootstrap_ridge_with_y_projection(Rstim, Rresp, Pstim, Presp, alphas,
     if return_wt:
         # Train final model with best alpha on full training set
         logger.info("Training final model with best alpha...")
-        wt = ridge_projected(Rstim, Rresp, best_alpha, up_projection_components,
+        wt = ridge_projected(Rstim, Rresp, best_alpha, 
+                        #    up_projection_components,
+                           up_projection_map_y,
                            projection_map_y, singcutoff=singcutoff, 
                            normalpha=normalpha, logger=logger)
         
@@ -763,7 +777,8 @@ def bootstrap_ridge_with_y_projection(Rstim, Rresp, Pstim, Presp, alphas,
         logger.info("Computing test correlations without storing weights...")
         
         # We need to recompute the prediction for the test set
-        wt = ridge_projected(Rstim, Rresp, best_alpha, up_projection_components,
+        wt = ridge_projected(Rstim, Rresp, best_alpha, up_projection_map_y,
+        # up_projection_components,
                            projection_map_y, singcutoff=singcutoff, 
                            normalpha=normalpha, logger=logger)
         pred = Pstim @ wt
