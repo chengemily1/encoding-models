@@ -113,16 +113,19 @@ if __name__ == "__main__":
     # Get explanatory variables
     Mx_train = delRstim
     Mx_test = delPstim
+
+    args.y_projection = 'pca'
+    args.n_evecs = 20
     
     # Bootstrap parameters
-    alphas = np.logspace(1, 4, 1) # 15) # Equally log-spaced ridge parameters between 10 and 10000. 
+    alphas = np.logspace(1, 4, 2) # 15) # Equally log-spaced ridge parameters between 10 and 10000. 
     nboots = 1 #3 # Number of cross-validation ridge regression runs. You can lower this number to increase speed.
     chunklen = 20
-    nchunks = int(len(Rresp) * 0.25 / chunklen)
+    nchunks = int(len(My_train) * 0.25 / chunklen)
 
     print('Computing projection maps on train data')
-    _, projection_map_y = down_project(Rresp, project_type=args.y_projection, n_evecs=args.n_evecs)
-    up_projection_map_y = get_up_projection_map(args, My_train, Rresp, Presp, project_type=args.y_projection, projection_map_y=projection_map_y)
+    _, projection_map_y = down_project(My_train, project_type=args.y_projection, n_evecs=args.n_evecs)
+    up_projection_map_y = get_up_projection_map(args, My_train, My_train, My_test, project_type=args.y_projection, projection_map_y=projection_map_y)
     print("Bootstrap ridge")
 
     # Use RJ's bootstrap ridge code modified to handle projection
@@ -135,13 +138,12 @@ if __name__ == "__main__":
     print("check the data type of the outputs")
 
     bootstrap_corrs = bootstrap_corrs.squeeze() # 1 x nvox x 1
-    pdb.set_trace()
     results = {
         'params': vars(args),
         'corr': list(corr), # nvox
-        'bscorrs': list(bootstrap_corrs),
+        'bscorrs': bootstrap_corrs.tolist(),
         'val_indices': list(valinds), 
-        'alphas': list(best_alpha) # nvox
+        'alphas': best_alpha # scalar
     }
     model_str = args.model.split('/')[-1]
 
