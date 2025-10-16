@@ -6,7 +6,6 @@ import time
 import joblib
 import torch
 from cvxopt import matrix, solvers # Only necessary for the stacked model.
-from transformers import AutoTokenizer, AutoModelForCausalLM # Only necessary for feature extraction.
 from pydiffmap import diffusion_map as dm
 import time
 import argparse
@@ -48,7 +47,7 @@ def parse_args():
     parser.add_argument("--y_projection", type=str, default="pca", choices=['pca', 'dm', 'I']) # I is identity projection
     parser.add_argument('--which_layers', type=str, default='single', help='feature selection algo', choices=['single', 'all', 'every_other', 'idCorr'])
     parser.add_argument("--n_layers", type=int, default=1, help="How many layers we want to include from the model")
-    parser.add_argument("--seed_layer", type=int, default=9, help="the first layer to include (only layer is n_layers=1)") 
+    parser.add_argument("--seed_layer", type=int, default=9, help="the first layer to include (only layer is n_layers=1)")
     parser.add_argument("--n_evecs", type=float, default=1000)
     parser.add_argument("--k", type=int, default=64)
     parser.add_argument('--device', type=str, default='cuda')
@@ -67,32 +66,49 @@ if __name__ == "__main__":
     print(args)
 
     # These files are located in the story_data folder of the Box
-    grids = joblib.load("grids_huge.jbl") # Load TextGrids containing story annotations
-    trfiles = joblib.load("trfiles_huge.jbl") # Load TRFiles containing TR information
     resp_dict = joblib.load("UTS03_responses.jbl") # Located in story_responses folder
+
+    with open('grids_cheap.txt', 'r') as f: # avoid oom
+        grids = [title.strip() for title in f.readlines()]
 
     # We'll build an encoding model using this set of stories for this tutorial.
     test_stories = ["wheretheressmoke", 'fromboyhoodtofatherhood', 'onapproachtopluto']
     train_stories = [story for story in resp_dict.keys() if story in grids and story not in test_stories]
 
-    # Filter out the other stories for the tutorial
-    for story in list(grids):
-        if story not in (train_stories + test_stories):
-            del grids[story]
-            del trfiles[story]
+    print('HERE')
 
-    # Make datasequence for story
-    wordseqs = make_word_ds(grids, trfiles)
+    if 'whisper' not in args.model and 'wavlm' not in args.model:
+        grids = joblib.load("grids_huge.jbl") # Load TextGrids containing story annotations
+        trfiles = joblib.load("trfiles_huge.jbl") # Load TRFiles containing TR information
 
-    # We will extract features now
-    feature_extractor = FeatureExtractor(wordseqs, args.model, train_stories, test_stories)
+        # Filter out the other stories for the tutorial
+        for story in list(grids):
+            if story not in (train_stories + test_stories):
+                del grids[story]
+                del trfiles[story]
 
-    # Convert back from dictionary to matrix
-    print('getting features')
-    os.environ["TOKENIZERS_PARALLELISM"] = "true" # multiprocessing with tokenizer in feature_extraction
-    feats = feature_extractor.get_features(args.which_layers, seed_layer=args.seed_layer) # N stories x L layers x d (previously N stories x d)
-    print('got the features')
-    
+        # Make datasequence for story
+        wordseqs = make_word_ds(grids, trfiles)
+
+        # We will extract features now
+        feature_extractor = FeatureExtractor(wordseqs, args.model, train_stories, test_stories)
+
+        # Convert back from dictionary to matrix
+        print('getting features')
+        os.environ["TOKENIZERS_PARALLELISM"] = "true" # multiprocessing with tokenizer in feature_extraction
+        feats = feature_extractor.get_features(args.which_layers, seed_layer=args.seed_layer) # N stories x L layers x d (previously N stories x d)
+        print('got the features')
+    elif 'whisper' in args.model:
+        # Load directly from file
+        features_path = f"/home/echeng/encoding-models/whisper-features/downsampled_featureseqs_whisper-large_layer{args.seed_layer}.jbl"
+        feats = joblib.load(features_path)
+    elif 'wavlm' in args.model:
+        # Load directly from file
+        features_path = "/home/echeng/encoding-models/wavlm-large_downsampled/layer.{}/{}.npz"
+        feats = {
+            story: np.load(features_path.format(args.seed_layer, story))['features'] for story in train_stories + test_stories
+        }
+
     # Training data
     Rstim = np.nan_to_num(np.vstack([ridge_utils.npp.zs(feats[story][10:-5]) for story in train_stories]))
 
@@ -107,19 +123,16 @@ if __name__ == "__main__":
     # Get response data
     Rresp = np.vstack([resp_dict[story] for story in train_stories]) # training Y
     Presp = np.vstack([resp_dict[story][40:] for story in test_stories]) # testing Y
-    My_train = Rresp 
-    My_test = Presp
+    My_train = Rresp.astype(np.float32)
+    My_test = Presp.astype(np.float32)
 
     # Get explanatory variables
-    Mx_train = delRstim
-    Mx_test = delPstim
+    Mx_train = delRstim.astype(np.float32)
+    Mx_test = delPstim.astype(np.float32)
 
-    args.y_projection = 'pca'
-    args.n_evecs = 20
-    
     # Bootstrap parameters
-    alphas = np.logspace(1, 4, 2) # 15) # Equally log-spaced ridge parameters between 10 and 10000. 
-    nboots = 1 #3 # Number of cross-validation ridge regression runs. You can lower this number to increase speed.
+    alphas = np.logspace(1, 4, 15) # Equally log-spaced ridge parameters between 10 and 10000.
+    nboots = 3 # Number of cross-validation ridge regression runs. You can lower this number to increase speed.
     chunklen = 20
     nchunks = int(len(My_train) * 0.25 / chunklen)
 
@@ -135,14 +148,21 @@ if __name__ == "__main__":
                                                         up_projection_map_y, projection_map_y,
                                                         y_projection=args.y_projection,
                                                     )
-    print("check the data type of the outputs")
-
-    bootstrap_corrs = bootstrap_corrs.squeeze() # 1 x nvox x 1
+    if type(best_alpha) != list:
+        best_alpha = best_alpha.tolist()
+    if type(valinds) != list:
+        valinds = valinds.tolist()
+    if type(bootstrap_corrs) != list:
+        bootstrap_corrs = bootstrap_corrs.squeeze() # 1 x nvox x 1
+        bootstrap_corrs = bootstrap_corrs.tolist()
+    if type(corr) != list:
+        corr = corr.tolist()
+    pdb.set_trace()
     results = {
         'params': vars(args),
         'corr': list(corr), # nvox
-        'bscorrs': bootstrap_corrs.tolist(),
-        'val_indices': list(valinds), 
+        'bscorrs': list(bootstrap_corrs),
+        'val_indices': list(valinds),
         'alphas': best_alpha # scalar
     }
     model_str = args.model.split('/')[-1]
