@@ -8,6 +8,62 @@ from sklearn.decomposition import PCA
 from pydiffmap import diffusion_map as dm
 import numpy as np
 
+def squish(X, layer_order, d=1000):
+    # X is layers x N x d
+    ipcas = []
+    
+    # init
+    squished_i = X[layer_order[0]]  # N x d0
+    # squished_i = (squished_i - squished_i.mean(0)) / (squished_i.std(0) + 1e-8)
+    
+    # iterate over the rest
+    for j in tqdm(range(1, len(layer_order)), desc='iterating pca'):
+        layer_idx = layer_order[j]
+        layer_i = X[layer_idx]  # N x d_i
+        # layer_i = (layer_i - layer_i.mean(0)) / (layer_i.std(0) + 1e-8) # normalize
+    
+        # combine current squished representation and new layer
+        combined = np.concatenate([squished_i, layer_i], axis=1)  # N x (d_prev + d_i)
+    
+        # update PCA basis
+        ipca = PCA(n_components=d)
+        ipca.fit(combined)
+    
+        # project combined manifold into shared d-dimensional subspace
+        squished_i = ipca.transform(combined)
+
+        ipcas.append(ipca)
+
+    return squished_i, ipcas
+
+def squish_test(X_test, ipcas, layer_order):
+    """
+    Project test representations into the same shared subspace 
+    learned from training via PCA.
+
+    X_test: np.ndarray of shape (num_layers, N_test, d_i)
+    ipca: fitted IncrementalPCA object from training
+    layer_order: list of layer indices used during training
+    """
+    
+    # initialize with the first layer
+    squished_i = X_test[layer_order[0]]
+    squished_i = (squished_i - squished_i.mean(0)) / (squished_i.std(0) + 1e-8)
+    
+    for j in tqdm(range(1, len(layer_order)), desc='projecting test'):
+        layer_idx = layer_order[j]
+        layer_i = X_test[layer_idx]
+        layer_i = (layer_i - layer_i.mean(0)) / (layer_i.std(0) + 1e-8)
+        
+        # combine the current squished representation with the new layer
+        combined = np.concatenate([squished_i, layer_i], axis=1)
+        
+        # project into the learned PCA subspace (no fitting)
+        ipca = ipcas[j-1]
+        squished_i = ipca.transform(combined)
+
+    return squished_i  # shape: (N_test, d)
+
 class IdentityProjection:
     def __init__(self):
         pass

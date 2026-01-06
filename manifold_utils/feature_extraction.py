@@ -6,7 +6,7 @@ import pdb
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForCausalLM # Only necessary for feature extraction.
 
-from ridge_utils.tokenization_helpers import generate_efficient_feat_dicts_opt, convert_to_feature_mats_opt, generate_efficient_feat_dicts_pythia, convert_to_feature_mats_pythia
+from ridge_utils.tokenization_helpers import generate_efficient_feat_dicts_opt, convert_to_feature_mats_opt, generate_efficient_feat_dicts_pythia, convert_to_feature_mats_pythia, generate_efficient_feat_dicts_llama, convert_to_feature_mats_llama
 from manifold_utils.id_corr import pick_two
 
 class FeatureExtractor:
@@ -18,7 +18,7 @@ class FeatureExtractor:
         # Model and tokenizer
         self.model_name = model_str
         self.tokenizer = AutoTokenizer.from_pretrained(model_str) # Same tokenizer for all sizes
-        self.model = AutoModelForCausalLM.from_pretrained(model_str, device_map='auto').to(device)
+        self.model = AutoModelForCausalLM.from_pretrained(model_str, device_map='auto')#.to(device)
         self.device = device
 
         # Data
@@ -55,6 +55,8 @@ class FeatureExtractor:
             return generate_efficient_feat_dicts_opt
         elif 'pythia' in self.model_name:
             return generate_efficient_feat_dicts_pythia
+        elif 'Llama' in self.model_name:
+            return generate_efficient_feat_dicts_llama
         else:
             raise ValueError(f"Model {self.model_name} not supported for feature extraction.")
 
@@ -87,20 +89,21 @@ class FeatureExtractor:
             return convert_to_feature_mats_opt
         elif 'pythia' in self.model_name:
             return convert_to_feature_mats_pythia
+        elif 'Llama' in self.model_name:
+            return convert_to_feature_mats_llama
         else:
             raise ValueError(f"Model {self.model_name} not supported for feature extraction.")
 
 
     def get_features(self, selection_method: str, seed_layer = None):
         """
-
         Args:
             selection_method (str): selection_method in "single layer", "idCorr"
 
         Returns:
             dict {story_name (str): features np.array} : Each feature matrix is N x d
         """
-        assert selection_method in ['single', 'all', 'idCorr'], "selection_method must be one of ['single', 'all', 'idCorr']"
+        assert selection_method in ['single', 'all', 'idCorr', 'every_other', 'ipca'], "selection_method must be one of ['single', 'all', 'idCorr']"
 
         # result is {story_name: N x L layers x d dimensions}
         convert_to_feature_mats = self._get_features_getter()
@@ -115,16 +118,22 @@ class FeatureExtractor:
         if selection_method == 'single':
             result_feature_selected = {story: result[story][:,seed_layer,:] for story in result}
             layer_idxs = [seed_layer]
-        elif selection_method == 'all':
+        elif selection_method in ('all', 'ipca'):
             result_feature_selected = {}
             for story in result:
                 L_layers = result[story].shape[1]
                 result_feature_selected[story] = np.reshape(result[story], (result[story].shape[0], -1))
+                self.L_layers = L_layers
             layer_idxs = list(range(L_layers))
+        elif selection_method == 'every_other':
+            result_feature_selected = {}
+            for story in result:
+                L_layers = result[story].shape[1]
+                result_feature_selected[story] = np.reshape(result[story], (result[story].shape[0], -1))
+            layer_idxs = list(range(0,L_layers,2))
         elif selection_method == 'idCorr':
             train_stories_concat = np.concatenate([result[story] for story in self.train_stories], axis=0)
             print('get the shape of all_stores_concat, should still be L x D at the end')
-            pdb.set_trace()
             layer_idxs = pick_two(train_stories_concat, seed_layer)
             print('print the layer_idxs')
             pdb.set_trace()

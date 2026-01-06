@@ -26,10 +26,11 @@ import ridge_utils.npp
 from ridge_utils.util import make_delayed
 from ridge_utils.dsutils import make_word_ds
 
-from manifold_utils.projection import down_project, get_up_projection_map, get_up_projections_torch
+from manifold_utils.projection import down_project, get_up_projection_map, get_up_projections_torch, squish, squish_test
 from manifold_utils.algorithms import *
 from manifold_utils.constants import *
 from manifold_utils.feature_extraction import FeatureExtractor
+from manifold_utils.utils import get_layer_order
 
 def test(x_project, linear, inv_map):
     """
@@ -45,12 +46,14 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="facebook/opt-125m")
     parser.add_argument("--y_projection", type=str, default="pca", choices=['pca', 'dm', 'I']) # I is identity projection
-    parser.add_argument('--which_layers', type=str, default='single', help='feature selection algo', choices=['single', 'all', 'every_other', 'idCorr'])
+    parser.add_argument('--which_layers', type=str, default='single', help='feature selection algo', choices=['single', 'all', 'ipca', 'every_other', 'idCorr'])
+    parser.add_argument('--target_x_dim', type=int, default=1000)
     parser.add_argument("--n_layers", type=int, default=1, help="How many layers we want to include from the model")
     parser.add_argument("--seed_layer", type=int, default=9, help="the first layer to include (only layer is n_layers=1)")
     parser.add_argument("--n_evecs", type=float, default=1000)
     parser.add_argument("--k", type=int, default=64)
     parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--subject', type=int, choices=[2,3])
     parser.add_argument("--autoencoder_epochs", type=int, default=1000)
     parser.add_argument("--autoencoder_lr", type=float, default=1e-3)
 
@@ -66,7 +69,7 @@ if __name__ == "__main__":
     print(args)
 
     # These files are located in the story_data folder of the Box
-    resp_dict = joblib.load("UTS03_responses.jbl") # Located in story_responses folder
+    resp_dict = joblib.load(f"UTS0{args.subject}_responses.jbl") # Located in story_responses folder
 
     with open('grids_cheap.txt', 'r') as f: # avoid oom
         grids = [title.strip() for title in f.readlines()]
@@ -97,17 +100,41 @@ if __name__ == "__main__":
         print('getting features')
         os.environ["TOKENIZERS_PARALLELISM"] = "true" # multiprocessing with tokenizer in feature_extraction
         feats = feature_extractor.get_features(args.which_layers, seed_layer=args.seed_layer) # N stories x L layers x d (previously N stories x d)
+        # n_layers = feature_extractor.L_layers
         print('got the features')
     elif 'whisper' in args.model:
-        # Load directly from file
-        features_path = f"/home/echeng/encoding-models/whisper-features/downsampled_featureseqs_whisper-large_layer{args.seed_layer}.jbl"
-        feats = joblib.load(features_path)
+        if args.which_layers in ('ipca', 'all'):
+            feats = {}
+            for seed_layer in range(0, 33, 2):
+                features_path = f"/home/echeng/encoding-models/whisper-features/downsampled_featureseqs_whisper-large_layer{seed_layer}.jbl"
+                feats_layer = joblib.load(features_path)  
+                for story in feats_layer:
+                    if story not in feats: feats[story] = []
+                    feats[story].append(feats_layer[story])
+            n_layers = len(feats[list(feats.keys())[0]])
+            feats = {story: np.array(feats[story]).transpose(1, 0, 2) for story in feats}
+            feats = {story: feats[story].reshape(feats[story].shape[0], feats[story].shape[1] * feats[story].shape[2]) for story in feats}
+        else:
+            features_path = f"/home/echeng/encoding-models/whisper-features/downsampled_featureseqs_whisper-large_layer{args.seed_layer}.jbl"
+            feats = joblib.load(features_path)
+
     elif 'wavlm' in args.model:
+        n_layers = 25
+
         # Load directly from file
-        features_path = "/home/echeng/encoding-models/wavlm-large_downsampled/layer.{}/{}.npz"
-        feats = {
-            story: np.load(features_path.format(args.seed_layer, story))['features'] for story in train_stories + test_stories
-        }
+        features_path = '/home/echeng/encoding-models/wavlm-large_downsampled/layer.{}/{}.npz'
+        
+        if args.which_layers in ('ipca', 'all'):
+            feats = { # story: N x (L x D)
+                story: np.array([np.load(features_path.format(seed_layer, story))['features'] for seed_layer in range(n_layers)]).transpose(1, 0, 2) for story in tqdm(train_stories + test_stories, desc='Loading features')
+            }
+            feats = {story: feats[story].reshape(feats[story].shape[0], feats[story].shape[1] * feats[story].shape[2]) for story in feats}
+            print('check the shape of the feats')
+            # pdb.set_trace()
+        else:
+            feats = {
+                story: np.load(features_path.format(args.seed_layer, story))['features'] for story in train_stories + test_stories
+            }
 
     # Training data
     Rstim = np.nan_to_num(np.vstack([ridge_utils.npp.zs(feats[story][10:-5]) for story in train_stories]))
@@ -136,7 +163,16 @@ if __name__ == "__main__":
     chunklen = 20
     nchunks = int(len(My_train) * 0.25 / chunklen)
 
-    print('Computing projection maps on train data')
+    print('Computing projection maps on train data explanatory variable')
+    if args.which_layers == 'ipca':
+        # Load layer order
+        layer_order = get_layer_order(args.model)
+        Mx_train = Mx_train.reshape((Mx_train.shape[0], n_layers, Mx_train.shape[-1] // n_layers)).transpose((1, 0, 2)) # L x N x D
+        Mx_test = Mx_test.reshape((Mx_test.shape[0], n_layers, Mx_test.shape[-1] // n_layers)).transpose((1, 0, 2))
+        Mx_train, ipca = squish(Mx_train, layer_order, d=args.target_x_dim)
+        Mx_test = squish_test(Mx_test, ipca, layer_order)
+
+    print('Computing projection maps on train data response')
     _, projection_map_y = down_project(My_train, project_type=args.y_projection, n_evecs=args.n_evecs)
     up_projection_map_y = get_up_projection_map(args, My_train, My_train, My_test, project_type=args.y_projection, projection_map_y=projection_map_y)
     print("Bootstrap ridge")
@@ -157,7 +193,7 @@ if __name__ == "__main__":
         bootstrap_corrs = bootstrap_corrs.tolist()
     if type(corr) != list:
         corr = corr.tolist()
-    pdb.set_trace()
+
     results = {
         'params': vars(args),
         'corr': list(corr), # nvox
@@ -168,8 +204,8 @@ if __name__ == "__main__":
     model_str = args.model.split('/')[-1]
 
     # Save
-    save_dir = f'/home/echeng/encoding-models/results/{model_str}'
+    save_dir = f'/home/echeng/encoding-models/results/{model_str}/UTS0{args.subject}'
     os.makedirs(save_dir, exist_ok=True)
 
-    with open(f'{save_dir}/results_{args.which_layers}_n_layers_{args.n_layers}_seed_layer_{args.seed_layer}_y_rank_{args.n_evecs}_{args.y_projection}_ridge.json', 'w') as f:
+    with open(f'{save_dir}/results_{args.which_layers}_n_layers_{args.n_layers}_seed_layer_{args.seed_layer}_x_rank_{args.target_x_dim}_y_rank_{args.n_evecs}_{args.y_projection}_ridge.json', 'w') as f:
         json.dump(results, f)

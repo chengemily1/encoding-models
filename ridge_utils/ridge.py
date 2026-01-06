@@ -626,7 +626,6 @@ def bootstrap_ridge(Rstim, Rresp, Pstim, Presp, alphas, nboots, chunklen, nchunk
 
 def bootstrap_ridge_with_y_projection(Rstim, Rresp, Pstim, Presp, alphas, 
                                      nboots, chunklen, nchunks,
-                                    #  up_projection_components,
                                      up_projection_map_y, 
                                      projection_map_y,
                                      corrmin=0.2, singcutoff=1e-10, 
@@ -689,8 +688,16 @@ def bootstrap_ridge_with_y_projection(Rstim, Rresp, Pstim, Presp, alphas,
     
     # Check if identity projection was requested
     if y_projection == 'I':
-        raise NotImplementedError("Standard bootstrap_ridge should be called directly for identity projection.")
-    
+        print('Calling original ridge function')
+        return bootstrap_ridge(Rstim, 
+                               Rresp, 
+                               Pstim, 
+                               Presp, 
+                               alphas, 
+                               nboots, 
+                               chunklen, 
+                               nchunks)
+
     logger.info(f"Starting bootstrap with {nboots} boots, {len(alphas)} alphas")
     logger.info(f"Data: {nresp} timepoints, {nvox} voxels")
     logger.info(f"Projection: {projection_map_y.n_components} components, type: {y_projection}")
