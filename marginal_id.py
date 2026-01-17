@@ -16,6 +16,7 @@ import os
 from dadapy import Data
 from contextlib import contextmanager
 from joblib import Parallel, delayed
+from transformers import AutoModel
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ def parse_args():
 
     return args
 
-def extract_llm_features(model, train_stories, test_stories, add_delay=False):
+def extract_llm_features(model, train_stories, test_stories, path_to_checkpoint=None, add_delay=False):
     if 'whisper' not in model and 'wavlm' not in model:
         grids = joblib.load("grids_huge.jbl") # Load TextGrids containing story annotations
         trfiles = joblib.load("trfiles_huge.jbl") # Load TRFiles containing TR information
@@ -81,12 +82,20 @@ def extract_llm_features(model, train_stories, test_stories, add_delay=False):
     elif 'wavlm' in args.model:
         n_layers = 25
 
-        # Load directly from file
-        features_path = '/home/echeng/encoding-models/wavlm-large_downsampled/layer.{}/{}.npz'        
-        feats = { # story: N x (L x D)
-            story: np.array([np.load(features_path.format(seed_layer, story))['features'] for seed_layer in range(n_layers)]).transpose(1, 0, 2) for story in tqdm(stories, desc='Loading features')
-        }
-        feats = {story: feats[story].reshape(feats[story].shape[0], feats[story].shape[1] * feats[story].shape[2]) for story in feats}
+        if path_to_checkpoint is not None:
+            model = AutoModel.from_pretrained("microsoft/wavlm-base-plus", output_hidden_states=True, device_map='auto')
+            model.load_state_dict(torch.load(path_to_checkpoint , map_location=model.device))
+
+            # Push the stories through the model and extract the last token representation?
+            
+
+        else:
+            # Load directly from file
+            features_path = '/home/echeng/encoding-models/wavlm-large_downsampled/layer.{}/{}.npz'        
+            feats = { # story: N x (L x D)
+                story: np.array([np.load(features_path.format(seed_layer, story))['features'] for seed_layer in range(n_layers)]).transpose(1, 0, 2) for story in tqdm(stories, desc='Loading features')
+            }
+            feats = {story: feats[story].reshape(feats[story].shape[0], feats[story].shape[1] * feats[story].shape[2]) for story in feats}
 
     print(f'model has {n_layers} layers')
 
